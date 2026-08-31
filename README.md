@@ -283,6 +283,19 @@ labeled structure.
   `infernal-pf2e-rules-simple`'s own database.
 - `HEALTH_ADDRESS` (default `0.0.0.0:8090`)
 
+## Status
+
+Verified live 2026-08-31 against a real kind-deployed kernel, evaluator,
+and both PF2e services' own isolated PostgreSQL instances: a separate
+Requester identity submitted a real signed `pf2e.parse` Request; this
+service claimed it, parsed one candidate, and submitted
+`pf2e.rules.admit` under its own identity; `infernal-pf2e-rules-simple`
+claimed and admitted it as a new authoritative rule. The `candidate_id`
+this service's own retry-cache recorded matched exactly the
+`candidate_id` the Rules Service stored against the admitted rule, and
+`infernal-law`'s own database contained zero PF2e-specific tables
+afterward. See `tests/live_requester_submission.rs`.
+
 ## Development
 
 ```sh
