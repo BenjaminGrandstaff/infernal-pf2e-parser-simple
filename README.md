@@ -361,4 +361,7 @@ the other except through Infernal Law's governed contracts.
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+MIT. See [LICENSE](LICENSE). This applies to the software only --
+Pathfinder Second Edition rule content this service parses is Licensed
+Material under the Open RPG Creative License; see
+[ORC-NOTICE.md](ORC-NOTICE.md).
