@@ -11,6 +11,7 @@
 //! `pf2e.rules.admit` Requests of its own under its own identity -- never
 //! a direct call to the Rules Service.
 
+pub mod book_adapter;
 pub mod claims;
 pub mod database;
 pub mod dispatch;
