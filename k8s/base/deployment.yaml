@@ -1,0 +1,102 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: infernal-pf2e-parser-simple
+  labels:
+    app.kubernetes.io/name: infernal-pf2e-parser-simple
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: infernal-pf2e-parser-simple
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: infernal-pf2e-parser-simple
+    spec:
+      automountServiceAccountToken: false
+      serviceAccountName: infernal-pf2e-parser-simple
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: infernal-pf2e-parser-simple
+          image: localhost/infernal-pf2e-parser-simple:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: health
+              containerPort: 8090
+              protocol: TCP
+          env:
+            - name: KERNEL_AUTHORITY
+              value: "infernal-law"
+            - name: KERNEL_CA_CERT_PATH
+              value: /etc/infernal-law/ca/ca.crt
+            # Must already be provisioned as an identities row and
+            # enrolled with the kernel (ADR-0008), with communication
+            # admission enabled and ILK-002 authority grants for both
+            # pf2e.parse (received) and pf2e.rules.admit (submitted by
+            # this service itself, under its own identity) and
+            # subscription.create.
+            - name: PARSER_SERVICE_ID
+              value: "00000000-0000-4000-8000-000000000009"
+            - name: SERVICE_ENDPOINT
+              value: https://infernal-pf2e-parser-simple
+            - name: POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
+            # - name: ENROLLMENT_CHALLENGE
+            #   value: ""
+            - name: PF2E_PARSER_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: infernal-pf2e-parser-database
+                  key: url
+          volumeMounts:
+            - name: kernel-ca-cert
+              mountPath: /etc/infernal-law/ca
+              readOnly: true
+            - name: enrollment-token
+              mountPath: /var/run/secrets/infernal-law-enrollment
+              readOnly: true
+          livenessProbe:
+            httpGet:
+              path: /health/live
+              port: health
+            initialDelaySeconds: 2
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: health
+            initialDelaySeconds: 1
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 250m
+              memory: 64Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            readOnlyRootFilesystem: true
+      volumes:
+        - name: kernel-ca-cert
+          configMap:
+            name: infernal-law-ca-cert
+        - name: enrollment-token
+          projected:
+            sources:
+              - serviceAccountToken:
+                  path: token
+                  audience: infernal-law-enrollment
+                  expirationSeconds: 600
+      terminationGracePeriodSeconds: 10
