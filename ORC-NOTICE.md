@@ -33,6 +33,25 @@ extract or normalize Reserved Material into rule fields.
 None. This project does not designate any additional Reserved
 Material as Licensed Material.
 
+## Known limitation: Reserved Material is not yet filtered
+
+The commitment above is a policy, not yet an enforced one. This
+service's extraction (`parser.rs`) currently populates `name`,
+`trigger`, and `effect` from whatever explicitly labeled source text it
+finds, with no detection or stripping of proper nouns or other Reserved
+Material -- and `infernal-pf2e-rules-simple`'s own admission validation
+does not check for it either. ORC's own guidance for a possessive-
+proper-noun mechanic name (e.g. "Bimbol's Bursting Bunion") is to
+delete the proper noun and keep the generic name ("Bursting Bunion");
+no such stripping exists yet on either hop.
+
+This is a real, current gap, not a silent risk: only synthetic test
+fixtures have been parsed so far, so no actual Reserved Material has
+passed through this pipeline to date. It must be addressed -- in this
+service's extraction, the Rules Service's admission validation, or
+both -- before any real Paizo source text is fed through the pipeline,
+not worked around after the fact.
+
 ## Scope of this notice
 
 The MIT license in [`LICENSE`](LICENSE) covers this repository's
