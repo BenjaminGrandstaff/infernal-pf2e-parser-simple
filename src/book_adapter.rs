@@ -38,11 +38,19 @@
 //!
 //! Feats (`convert_feat_page`):
 //! - a feat that is *also* an action (its name line carries its own
-//!   `[two-actions]`-style bracket, e.g. "Boulder Roll") is not
-//!   recognized as a feat heading at all -- `RuleType` cannot express
-//!   "both Feat and Action" for one candidate, and this module does
-//!   not pick one on the book's behalf; it is simply not extracted
-//!   yet, rather than mis-typed;
+//!   `[two-actions]`-style bracket, e.g. "Boulder Roll", "Combat
+//!   Assessment") is not recognized as a feat heading at all --
+//!   `RuleType` cannot express "both Feat and Action" for one
+//!   candidate, and this module does not pick one on the book's
+//!   behalf; it is simply not extracted yet, rather than mis-typed.
+//!   Its orphaned `FEAT <level>` marker and trait line are silently
+//!   absorbed into whatever entry precedes it in the text, rather than
+//!   producing a candidate of their own -- confirmed as the right
+//!   failure mode only after the wrong one (the bare marker line
+//!   itself misread as a fresh heading, with the trait word after it
+//!   as a bogus name) turned up hundreds of times at full-corpus
+//!   scale; see `split_feat_entries`'s own guard against a `FEAT
+//!   <level>` line ever starting a heading scan on its own;
 //! - `Prerequisites` is deliberately **not** split out of the book's
 //!   prose the way `Requirements`/`Trigger` are for actions: unlike
 //!   those, a feat's `Prerequisites` clause runs directly into the
@@ -242,15 +250,51 @@ fn extract_book_label(paragraph: &str, label: &str) -> Option<(String, Option<St
 
 struct RawFeatEntry {
     name: String,
+    traits: Vec<String>,
     body_lines: Vec<String>,
 }
 
 /// Converts one page chunk's raw extracted `text` containing Feat
 /// entries into zero or more `parser::parse_candidates`-ready blocks.
-/// A Feat entry is recognized by an ALL-CAPS name line immediately
-/// followed (skipping blank lines) by the book's own unambiguous
-/// marker, a `FEAT <level>` line -- mirrored from the bracketed
-/// action-cost marker `convert_page` uses for the same purpose.
+///
+/// A feat entry's heading is not always the simple "name, then one
+/// trait, then `FEAT <level>`" shape it first appears to be. A
+/// dual-trait feat (e.g. Player Core's *Additional Lore*, a General
+/// *and* Skill feat) prints its name immediately followed by its
+/// *first* trait tag with no blank line between them at all, then
+/// interleaves a `FEAT <level>` marker with each trait tag before the
+/// real prose begins:
+///
+/// ```text
+/// ADDITIONAL LORE
+/// GENERAL
+///
+/// FEAT 1
+///
+/// SKILL
+///
+/// FEAT 1
+///
+/// GENERAL
+///
+/// Your knowledge has expanded...
+/// ```
+///
+/// A fixed two-line "name, then FEAT N" lookahead cannot recover this:
+/// it never matches "ADDITIONAL LORE" (immediately followed by
+/// "GENERAL", not "FEAT N"), silently drops the real name, and then
+/// matches "GENERAL" as its own bogus feat instead -- confirmed at
+/// scale (`GENERAL`, `ARCHETYPE`, and every class trait word turned
+/// up as a repeated "feat name" hundreds of times once this ran
+/// against the full corpus, not just a handful of curated fixtures).
+///
+/// `try_read_heading_block` fixes this by not assuming a fixed shape
+/// at all: it scans forward through the *entire* contiguous run of
+/// shouty lines and `FEAT <level>` markers (blank lines skipped, any
+/// order, any count) until the first line that is neither. The first
+/// shouty line in that run is the name; every other distinct shouty
+/// line is a trait, in the order encountered. A run with no `FEAT`
+/// marker anywhere in it is not a feat heading at all.
 pub fn convert_feat_page(text: &str) -> String {
     split_feat_entries(text)
         .iter()
@@ -267,17 +311,34 @@ fn split_feat_entries(text: &str) -> Vec<RawFeatEntry> {
 
     while index < lines.len() {
         let line = lines[index];
-        if !line.is_empty() && is_shouty(line) {
-            if let Some(next_index) = next_non_blank(&lines, index + 1) {
-                if is_feat_level_marker(lines[next_index]) {
-                    entries.extend(current.take());
-                    current = Some(RawFeatEntry {
-                        name: title_case(line),
-                        body_lines: Vec::new(),
-                    });
-                    index = next_index + 1;
-                    continue;
-                }
+        if line.is_empty() {
+            index += 1;
+            continue;
+        }
+        // A `FEAT <level>` line is itself technically "shouty" (a digit
+        // doesn't break the all-uppercase check), but it must never be
+        // the *start* of a heading-block scan on its own -- it only
+        // ever belongs inside one already in progress. Without this
+        // guard, a dual Feat+Action entry (its name line carries its
+        // own action-cost bracket, e.g. "Combat Assessment
+        // [one-action]" -- not itself shouty, so skipped as ordinary
+        // text per the limitation this module's doc already names)
+        // leaves its own orphaned `FEAT <level>` and trait lines
+        // behind, and the scanner would misread the bare marker line
+        // as a fresh heading, with the trait word that follows it
+        // becoming a bogus name (confirmed at scale: "Fighter",
+        // "Archetype", and other class-trait words each turned up as
+        // a repeated "feat name" dozens of times).
+        if is_shouty(line) && !is_feat_level_marker(line) {
+            if let Some((name, traits, next_index)) = try_read_heading_block(&lines, index) {
+                entries.extend(current.take());
+                current = Some(RawFeatEntry {
+                    name,
+                    traits,
+                    body_lines: Vec::new(),
+                });
+                index = next_index;
+                continue;
             }
         }
         if let Some(entry) = current.as_mut() {
@@ -289,14 +350,54 @@ fn split_feat_entries(text: &str) -> Vec<RawFeatEntry> {
     entries
 }
 
-fn next_non_blank(lines: &[&str], mut index: usize) -> Option<usize> {
-    while index < lines.len() {
-        if !lines[index].is_empty() {
-            return Some(index);
+/// A safety bound on how many shouty/level-marker lines one heading
+/// block may absorb before giving up -- guards against an unrelated
+/// run of all-caps text elsewhere in the book (an index page, a table
+/// of contents) being scanned indefinitely looking for a `FEAT`
+/// marker that will never come.
+const MAX_HEADING_BLOCK_LINES: usize = 8;
+
+/// See `convert_feat_page`'s own documentation for why this exists.
+/// Returns `None` (not a heading) if the run starting at `start` never
+/// contains a `FEAT <level>` marker before hitting real prose.
+fn try_read_heading_block(lines: &[&str], start: usize) -> Option<(String, Vec<String>, usize)> {
+    let mut index = start;
+    let mut shouty_lines: Vec<&str> = Vec::new();
+    let mut saw_feat_marker = false;
+
+    while index < lines.len() && shouty_lines.len() <= MAX_HEADING_BLOCK_LINES {
+        let line = lines[index];
+        if line.is_empty() {
+            index += 1;
+            continue;
         }
-        index += 1;
+        if is_feat_level_marker(line) {
+            saw_feat_marker = true;
+            index += 1;
+            continue;
+        }
+        if is_shouty(line) {
+            shouty_lines.push(line);
+            index += 1;
+            continue;
+        }
+        break;
     }
-    None
+
+    if !saw_feat_marker {
+        return None;
+    }
+    let (name_line, trait_lines) = shouty_lines.split_first()?;
+
+    let mut traits = Vec::new();
+    for &line in trait_lines {
+        let trait_word = line.to_lowercase();
+        if !traits.contains(&trait_word) {
+            traits.push(trait_word);
+        }
+    }
+
+    Some((title_case(name_line), traits, index))
 }
 
 fn is_feat_level_marker(line: &str) -> bool {
@@ -305,22 +406,11 @@ fn is_feat_level_marker(line: &str) -> bool {
 }
 
 fn render_feat_block(entry: &RawFeatEntry) -> String {
-    let paragraphs = group_paragraphs(&entry.body_lines);
-
-    let mut traits = Vec::new();
-    let mut effect_parts = Vec::new();
-
-    for (index, paragraph) in paragraphs.iter().enumerate() {
-        if index == 0 && is_shouty(paragraph) && paragraph.split_whitespace().count() <= 3 {
-            traits.extend(paragraph.split_whitespace().map(str::to_lowercase));
-            continue;
-        }
-        effect_parts.push(paragraph.clone());
-    }
+    let effect_parts = group_paragraphs(&entry.body_lines);
 
     let mut lines = vec!["Feat".to_owned(), format!("Name: {}", entry.name)];
-    if !traits.is_empty() {
-        lines.push(format!("Traits: {}", traits.join(", ")));
+    if !entry.traits.is_empty() {
+        lines.push(format!("Traits: {}", entry.traits.join(", ")));
     }
     if !effect_parts.is_empty() {
         lines.push(format!("Effect: {}", effect_parts.join(" ")));
@@ -583,6 +673,120 @@ and sworn not to use such magic yourself.
             candidates[3].effect
         );
         assert!(candidates[3].prerequisites.is_empty());
+    }
+
+    /// Verbatim extraction of Player Core page 253 -- the exact real
+    /// text that first exposed this bug: at full-corpus scale (all
+    /// 1,404 page chunks across four books), the old two-line
+    /// lookahead misdetected the trait word "General" as a feat name
+    /// 124 times, "Archetype" 76 times, and so on for every dual-trait
+    /// feat and every class-trait word in the book.
+    const PLAYER_CORE_DUAL_TRAIT_FEATS: &str = "\
+ADDITIONAL LORE
+GENERAL
+
+FEAT 1
+
+SKILL
+
+FEAT 1
+
+GENERAL
+
+Your knowledge has expanded to encompass a new field.
+Choose a Lore skill subcategory. You become trained in it.
+
+ADOPTED ANCESTRY
+
+FEAT 1
+
+GENERAL
+
+You're fully immersed in another ancestry's culture and
+traditions.
+";
+
+    #[test]
+    fn a_dual_trait_feats_name_is_recovered_not_swallowed_by_its_own_trait_tag() {
+        let converted = convert_feat_page(PLAYER_CORE_DUAL_TRAIT_FEATS);
+        let candidates = parse_candidates(&converted);
+
+        assert_eq!(candidates.len(), 2, "converted:\n{converted}");
+
+        assert_eq!(candidates[0].name.as_deref(), Some("Additional Lore"));
+        assert_eq!(
+            candidates[0].traits,
+            vec!["general".to_owned(), "skill".to_owned()],
+            "converted:\n{converted}"
+        );
+        assert!(
+            candidates[0]
+                .effect
+                .as_deref()
+                .unwrap()
+                .starts_with("Your knowledge has expanded")
+        );
+
+        assert_eq!(candidates[1].name.as_deref(), Some("Adopted Ancestry"));
+        assert_eq!(candidates[1].traits, vec!["general".to_owned()]);
+    }
+
+    /// Verbatim extraction of Player Core page 78 (Fighter feats) --
+    /// the second real bug the full-corpus run turned up. "Combat
+    /// Assessment" and "Double Slice" are dual Feat+Action entries
+    /// (their own `[one-action]`/`[two-actions]` bracket), an already-
+    /// documented gap. What the corpus run actually exposed was what
+    /// happened to their *orphaned* `FEAT 1`/`FIGHTER` lines once the
+    /// entry itself was skipped: the bare `FEAT 1` marker line was
+    /// misread as a fresh heading trigger, turning "Fighter" into a
+    /// bogus feat name -- 55 times across the corpus.
+    const PLAYER_CORE_FIGHTER_FEATS: &str = "\
+1ST LEVEL
+COMBAT ASSESSMENT [one-action]
+
+FEAT 1
+
+FIGHTER
+
+You make a telegraphed attack to learn about your foe.
+
+DOUBLE SLICE [two-actions]
+
+FEAT 1
+
+FIGHTER
+
+Requirements You are wielding two melee weapons, each in a
+different hand.
+You lash out at your foe with both weapons.
+
+MOBILE SHOT STANCE
+
+FEAT 1
+
+FIGHTER
+
+You focus on ranged combat, ready to fire at any moment.
+";
+
+    #[test]
+    fn a_dual_typed_feats_orphaned_feat_marker_never_becomes_a_bogus_heading() {
+        let converted = convert_feat_page(PLAYER_CORE_FIGHTER_FEATS);
+        let candidates = parse_candidates(&converted);
+
+        // Only the one real, cleanly-typed feat -- neither
+        // "Combat Assessment" nor "Double Slice" is extracted (both
+        // are dual Feat+Action, a separate documented gap), and
+        // critically, no bogus "Fighter" candidate is fabricated from
+        // their orphaned FEAT 1 / FIGHTER lines.
+        assert_eq!(candidates.len(), 1, "converted:\n{converted}");
+        assert_eq!(candidates[0].name.as_deref(), Some("Mobile Shot Stance"));
+        assert_eq!(candidates[0].traits, vec!["fighter".to_owned()]);
+        assert!(
+            !candidates
+                .iter()
+                .any(|c| c.name.as_deref() == Some("Fighter"))
+        );
     }
 
     /// Verbatim extraction of the Player Core Conditions Appendix
