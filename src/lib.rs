@@ -230,7 +230,7 @@ pub fn work_once(
     }
 }
 
-pub fn run(config: Config) -> ! {
+pub fn run(config: Config, heartbeat: health::Heartbeat) -> ! {
     let Config {
         client,
         repository,
@@ -241,8 +241,16 @@ pub fn run(config: Config) -> ! {
     loop {
         renew_lease_if_due(&client, &mut instance_lease);
         match work_once(&client, &repository, lease_seconds) {
-            Ok(WorkOutcome::NothingEligible) => {}
-            Ok(outcome) => println!("{outcome:?}"),
+            // Nothing eligible is a healthy answer from the kernel, not a
+            // failure, so it keeps the heartbeat fresh. Only an error lets
+            // it go stale.
+            Ok(WorkOutcome::NothingEligible) => {
+                heartbeat.record_success(health::now_seconds());
+            }
+            Ok(outcome) => {
+                heartbeat.record_success(health::now_seconds());
+                println!("{outcome:?}");
+            }
             Err(error) => eprintln!("work pass failed: {error}"),
         }
         std::thread::sleep(poll_interval);
